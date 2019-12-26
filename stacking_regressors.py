@@ -19,61 +19,78 @@ from xgboost import XGBRegressor
 # Ignore future warnings from XGBoost. I know, it's wrong to do this, but ...
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-out_list = []
-for smiles_filename in sorted(glob("*.smi")):
-    print(smiles_filename)
-    df = pd.read_csv(smiles_filename, sep=" ", header=None)
-    df.columns = ['smiles', 'name', 'pIC50']
 
-    # Generate the descriptors wit PyJanitor
-    fp = janitor.chemistry.morgan_fingerprint(
-        df=df.smiles2mol('smiles', 'mols'),
-        mols_column_name='mols',
-        radius=3,
-        nbits=2048,
-        kind='counts'
-    )
+def test_regressor(dataset_name, regressor, name, cycle, x_train, x_test, y_train, y_test):
+    regressor.fit(x_train, y_train)
+    pred = regressor.predict(x_test)
+    result = []
+    for p, y in zip(pred, y_test):
+        result.append([dataset_name, name, cycle, y, p])
+    return result
 
-    X = fp
-    y = df.pIC50
 
-    for i in tqdm(range(0, 10)):
-        X_train, X_test, y_train, y_test = train_test_split(X, y)
+def generate_regressors():
+    # first stacking regressor
+    estimators_1 = [
+        ('ridge', RidgeCV()),
+        ('xgb', XGBRegressor(objective='reg:squarederror'))
+    ]
+    stack_1 = StackingRegressor(
+        estimators=estimators_1,
+        final_estimator=RandomForestRegressor(n_estimators=10))
 
-        # first stacking regressor
-        estimators_1 = [
-            ('ridge', RidgeCV()),
-            ('xgb', XGBRegressor(objective='reg:squarederror'))
-        ]
-        reg_1 = StackingRegressor(
-            estimators=estimators_1,
-            final_estimator=RandomForestRegressor(n_estimators=10))
-        stack_1_r2 = reg_1.fit(X_train, y_train).score(X_test, y_test)
+    # second stacking regressor
+    estimators_2 = [('ridge', RidgeCV()),
+                    ('lasso', LassoCV(tol=0.03)),
+                    ('svr', SVR(C=1, gamma=1e-6))]
+    stack_2 = StackingRegressor(
+        estimators=estimators_2,
+        final_estimator=GradientBoostingRegressor())
 
-        # second stacking regressor
-        estimators_2 = [('ridge', RidgeCV()),
-                        ('lasso', LassoCV(tol=0.03)),
-                        ('svr', SVR(C=1, gamma=1e-6))]
-        reg_2 = StackingRegressor(
-            estimators=estimators_2,
-            final_estimator=GradientBoostingRegressor())
-        stack_2_r2 = reg_2.fit(X_train, y_train).score(X_test, y_test)
+    # XGBoost regressor
+    xgb = XGBRegressor(objective='reg:squarederror')
 
-        # XGBoost regressor
-        xgb = XGBRegressor(objective='reg:squarederror')
-        xgb.fit(X_train, y_train)
-        xgb_pred = xgb.predict(X_test)
-        xgb_r2 = r2_score(xgb_pred, y_test)
+    # Random Forest regressor
+    rf = RandomForestRegressor()
 
-        # Random Forest regressor
-        rf = RandomForestRegressor()
-        rf.fit(X_train, y_train)
-        rf_pred = rf.predict(X_test)
-        rf_r2 = r2_score(rf_pred, y_test)
+    regressor_list = [
+        (stack_1, "stack_1"),
+        (stack_2, "stack_2"),
+        (xgb, "xgb"),
+        (rf, "rf")
+    ]
 
-        current_res = [smiles_filename, stack_1_r2, stack_2_r2, xgb_r2, rf_r2]
-        print(current_res)
-        out_list.append(current_res)
+    return regressor_list
 
-out_df = pd.DataFrame(out_list, columns=["dataset", "stack", "xgb"])
-out_df.to_csv("stack.csv", index=False)
+
+def main():
+    out_list = []
+    for smiles_filename in sorted(glob("data/*.smi")):
+        print(smiles_filename)
+        df = pd.read_csv(smiles_filename, sep=" ", header=None)
+        df.columns = ['smiles', 'name', 'pIC50']
+
+        # Generate the descriptors wit PyJanitor
+        fp = janitor.chemistry.morgan_fingerprint(
+            df=df.smiles2mol('smiles', 'mols'),
+            mols_column_name='mols',
+            radius=3,
+            nbits=2048,
+            kind='counts'
+        )
+
+        X = fp
+        y = df.pIC50
+
+        cv_cycles = 10
+        dataset_name = smiles_filename.replace("data/", "").replace(".smi", "")
+        for i in tqdm(range(0, cv_cycles)):
+            X_train, X_test, y_train, y_test = train_test_split(X, y)
+            for regressor, name in generate_regressors():
+                out_list += test_regressor(dataset_name, regressor, name, i, X_train, X_test, y_train, y_test)
+
+    out_df = pd.DataFrame(out_list, columns=["dataset", "method", "cycle", "exp", "pred"])
+    out_df.to_csv("comparison.csv", index=False)
+
+
+main()
